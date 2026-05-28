@@ -17,9 +17,10 @@ import logging
 from pathlib import Path
 import shutil
 import os
+import tempfile
 import time
 import json
-from unittest import TestCase
+from unittest import TestCase, mock
 
 from flask import url_for
 
@@ -27,6 +28,7 @@ from pfcon.app import create_app
 from pfcon.compute.container_user import ContainerUser
 from pfcon.compute.abstractmgr import ManagerException
 from pfcon.base_resources import get_compute_mgr
+from pfcon.storage.fslink_storage import FSLinkStorage
 
 
 class NewResourcesFsLinkTests(TestCase):
@@ -306,3 +308,106 @@ class TestDeleteJobNoDataFsLink(NewResourcesFsLinkTests):
                          'finishedSuccessfully')
         self.assertEqual(response.json['compute']['message'],
                          'deleteSkipped')
+
+
+class TestFSLinkStorageGetDataSanitization(TestCase):
+    """
+    Unit tests for FSLinkStorage.get_data() output sanitization:
+    plugin-produced .chrislink files and symlinks must be removed,
+    and any failure to remove them must propagate (treated as fatal,
+    matching CUBE's _register_output_files() behavior).
+    """
+
+    def setUp(self):
+        logging.disable(logging.WARNING)
+        self.tmpdir = tempfile.mkdtemp()
+        self.job_output_rel = 'job-out'
+        self.outgoing_dir = os.path.join(self.tmpdir, self.job_output_rel)
+        os.makedirs(self.outgoing_dir)
+        self.storage = FSLinkStorage({'STOREBASE_MOUNT': self.tmpdir})
+
+    def tearDown(self):
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+        logging.disable(logging.NOTSET)
+
+    def _get_data(self):
+        content = self.storage.get_data('job-1', self.outgoing_dir,
+                                         job_output_path=self.job_output_rel)
+        return json.loads(content.getvalue().decode())
+
+    def test_removes_chrislink_files(self):
+        regular_path = os.path.join(self.outgoing_dir, 'out.txt')
+        link_path = os.path.join(self.outgoing_dir, 'evil.chrislink')
+        with open(regular_path, 'w') as f:
+            f.write('legit output')
+        with open(link_path, 'w') as f:
+            f.write('home/victim')
+
+        data = self._get_data()
+
+        self.assertFalse(os.path.exists(link_path))
+        self.assertTrue(os.path.exists(regular_path))
+        self.assertIn('out.txt', data['rel_file_paths'])
+        self.assertNotIn('evil.chrislink', data['rel_file_paths'])
+
+    def test_removes_symlinks(self):
+        target_path = os.path.join(self.tmpdir, 'secret.txt')
+        with open(target_path, 'w') as f:
+            f.write('secret data')
+        regular_path = os.path.join(self.outgoing_dir, 'out.txt')
+        with open(regular_path, 'w') as f:
+            f.write('legit output')
+        symlink_path = os.path.join(self.outgoing_dir, 'leak')
+        os.symlink(target_path, symlink_path)
+
+        data = self._get_data()
+
+        self.assertFalse(os.path.lexists(symlink_path))
+        self.assertTrue(os.path.exists(target_path))  # target untouched
+        self.assertTrue(os.path.exists(regular_path))
+        self.assertIn('out.txt', data['rel_file_paths'])
+        self.assertNotIn('leak', data['rel_file_paths'])
+
+    def test_chrislink_symlink_takes_chrislink_path(self):
+        # a *.chrislink symlink must be removed via os.remove (which unlinks
+        # the symlink itself, not its target) and logged through the
+        # .chrislink branch
+        target_path = os.path.join(self.tmpdir, 'target.txt')
+        with open(target_path, 'w') as f:
+            f.write('linked content')
+        link_path = os.path.join(self.outgoing_dir, 'evil.chrislink')
+        os.symlink(target_path, link_path)
+
+        data = self._get_data()
+
+        self.assertFalse(os.path.lexists(link_path))
+        self.assertTrue(os.path.exists(target_path))
+        self.assertNotIn('evil.chrislink', data['rel_file_paths'])
+
+    def test_raises_on_unremovable_chrislink(self):
+        link_path = os.path.join(self.outgoing_dir, 'evil.chrislink')
+        with open(link_path, 'w') as f:
+            f.write('home/victim')
+
+        with mock.patch('pfcon.storage.fslink_storage.os.remove',
+                        side_effect=OSError('permission denied')):
+            with self.assertRaises(OSError):
+                self.storage.get_data('job-1', self.outgoing_dir,
+                                       job_output_path=self.job_output_rel)
+        # link must still exist on disk: removal failed and the exception
+        # propagated, so the job is fatally failed by the caller
+        self.assertTrue(os.path.exists(link_path))
+
+    def test_raises_on_unremovable_symlink(self):
+        target_path = os.path.join(self.tmpdir, 'secret.txt')
+        with open(target_path, 'w') as f:
+            f.write('secret')
+        symlink_path = os.path.join(self.outgoing_dir, 'leak')
+        os.symlink(target_path, symlink_path)
+
+        with mock.patch('pfcon.storage.fslink_storage.os.remove',
+                        side_effect=OSError('permission denied')):
+            with self.assertRaises(OSError):
+                self.storage.get_data('job-1', self.outgoing_dir,
+                                       job_output_path=self.job_output_rel)
+        self.assertTrue(os.path.lexists(symlink_path))

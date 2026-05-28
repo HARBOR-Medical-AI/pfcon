@@ -81,7 +81,8 @@ class FSLinkStorage(BaseStorage):
         list of relative file paths.
 
         Any .chrislink files found in the outgoing directory are removed: ChRIS links
-        may only be authored by upstream CUBE, never by plugin output.
+        may only be authored by upstream CUBE, never by plugin output. In addition, any 
+        symlinks found in the outgoing directory are also removed.
         """
         fs_rel_file_paths = []
         job_output_path = kwargs['job_output_path']
@@ -96,6 +97,8 @@ class FSLinkStorage(BaseStorage):
                 local_file_path = os.path.join(root, filename)
 
                 if filename.endswith('.chrislink'):
+                    # a non-deletable attacker-controlled link left in an output
+                    # dir is a security-relevant state: fail the job
                     logger.warning(f'Removing unauthorized .chrislink file '
                                    f'{local_file_path} from job {job_id} output; '
                                    f'plugins are not allowed to create ChRIS links')
@@ -105,10 +108,26 @@ class FSLinkStorage(BaseStorage):
                         logger.error(f'Failed to remove unauthorized .chrislink file '
                                      f'{local_file_path} for job {job_id}, '
                                      f'detail: {str(e)}')
+                        raise
                     continue
 
-                if not os.path.islink(local_file_path):
-                    fs_rel_file_paths.append(os.path.join(rel_path, filename))
+                if os.path.islink(local_file_path):
+                    # symlinks can point anywhere on the mounted filesystem;
+                    # same blast radius as .chrislink, so treat as fatal on
+                    # removal failure
+                    logger.warning(f'Removing unauthorized symlink '
+                                   f'{local_file_path} from job {job_id} output; '
+                                   f'plugins are not allowed to create symlinks')
+                    try:
+                        os.remove(local_file_path)
+                    except OSError as e:
+                        logger.error(f'Failed to remove unauthorized symlink '
+                                     f'{local_file_path} for job {job_id}, '
+                                     f'detail: {str(e)}')
+                        raise
+                    continue
+
+                fs_rel_file_paths.append(os.path.join(rel_path, filename))
 
         data = {'job_output_path': job_output_path,
                 'rel_file_paths': fs_rel_file_paths}

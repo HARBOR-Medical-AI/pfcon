@@ -164,7 +164,12 @@ def main():
         key_dir = args[0]
 
     if subcommand == 'copy':
-        do_copy(key_dir)
+        try:
+            do_copy(key_dir)
+        except Exception as e:
+            logger.error(f'Copy worker failed for {key_dir}, '
+                         f'detail: {str(e)}')
+            sys.exit(1)
     elif subcommand == 'upload':
         do_upload(key_dir)
     elif subcommand == 'delete':
