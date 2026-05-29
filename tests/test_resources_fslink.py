@@ -14,7 +14,6 @@ Tests the full lifecycle:
 """
 
 import logging
-from pathlib import Path
 import shutil
 import os
 import tempfile
@@ -23,7 +22,9 @@ import json
 from unittest import TestCase, mock
 
 from flask import url_for
+from werkzeug.exceptions import NotFound
 
+import pfcon.copy_worker as cw
 from pfcon.app import create_app
 from pfcon.compute.container_user import ContainerUser
 from pfcon.compute.abstractmgr import ManagerException
@@ -389,11 +390,13 @@ class TestFSLinkStorageGetDataSanitization(TestCase):
         with open(link_path, 'w') as f:
             f.write('home/victim')
 
-        with mock.patch('pfcon.storage.fslink_storage.os.remove',
-                        side_effect=OSError('permission denied')):
-            with self.assertRaises(OSError):
-                self.storage.get_data('job-1', self.outgoing_dir,
-                                       job_output_path=self.job_output_rel)
+        with (
+            mock.patch('pfcon.storage.fslink_storage.os.remove',
+                       side_effect=OSError('permission denied')),
+            self.assertRaises(OSError),
+        ):
+            self.storage.get_data('job-1', self.outgoing_dir,
+                                   job_output_path=self.job_output_rel)
         # link must still exist on disk: removal failed and the exception
         # propagated, so the job is fatally failed by the caller
         self.assertTrue(os.path.exists(link_path))
@@ -405,11 +408,13 @@ class TestFSLinkStorageGetDataSanitization(TestCase):
         symlink_path = os.path.join(self.outgoing_dir, 'leak')
         os.symlink(target_path, symlink_path)
 
-        with mock.patch('pfcon.storage.fslink_storage.os.remove',
-                        side_effect=OSError('permission denied')):
-            with self.assertRaises(OSError):
-                self.storage.get_data('job-1', self.outgoing_dir,
-                                       job_output_path=self.job_output_rel)
+        with (
+            mock.patch('pfcon.storage.fslink_storage.os.remove',
+                       side_effect=OSError('permission denied')),
+            self.assertRaises(OSError),
+        ):
+            self.storage.get_data('job-1', self.outgoing_dir,
+                                   job_output_path=self.job_output_rel)
         self.assertTrue(os.path.lexists(symlink_path))
 
     def test_removes_symlink_to_directory(self):
@@ -444,11 +449,13 @@ class TestFSLinkStorageGetDataSanitization(TestCase):
         symlink_path = os.path.join(self.outgoing_dir, 'leak_dir')
         os.symlink(target_dir, symlink_path)
 
-        with mock.patch('pfcon.storage.fslink_storage.os.remove',
-                        side_effect=OSError('permission denied')):
-            with self.assertRaises(OSError):
-                self.storage.get_data('job-1', self.outgoing_dir,
-                                       job_output_path=self.job_output_rel)
+        with (
+            mock.patch('pfcon.storage.fslink_storage.os.remove',
+                       side_effect=OSError('permission denied')),
+            self.assertRaises(OSError),
+        ):
+            self.storage.get_data('job-1', self.outgoing_dir,
+                                   job_output_path=self.job_output_rel)
         self.assertTrue(os.path.lexists(symlink_path))
 
     def test_dirs_mutation_blocks_descent_when_followlinks_true(self):
@@ -471,9 +478,11 @@ class TestFSLinkStorageGetDataSanitization(TestCase):
             kwargs['followlinks'] = True
             return original_walk(*args, **kwargs)
 
-        with mock.patch('pfcon.storage.fslink_storage.os.remove'), \
-                mock.patch('pfcon.storage.fslink_storage.os.walk',
-                           side_effect=walk_with_followlinks):
+        with (
+            mock.patch('pfcon.storage.fslink_storage.os.remove'),
+            mock.patch('pfcon.storage.fslink_storage.os.walk',
+                       side_effect=walk_with_followlinks),
+        ):
             data = self._get_data()
 
         self.assertFalse(any('inside.txt' in p
@@ -568,8 +577,6 @@ class TestPluginJobFileFsLinkHTTPExceptionPassthrough(NewResourcesFsLinkTests):
     """
 
     def test_http_exception_from_storage_propagates_unchanged(self):
-        from werkzeug.exceptions import NotFound
-
         job_id = 'fslink-httpexc-1'
         output_rel = os.path.relpath(self.fs_output_path,
                                      self.storebase_mount)
@@ -601,14 +608,14 @@ class TestCopyWorkerExitOnFailure(TestCase):
     """
 
     def test_copy_subcommand_exits_1_on_exception(self):
-        import pfcon.copy_worker as cw
-
-        with mock.patch.object(cw, 'do_copy',
-                               side_effect=RuntimeError('boom')):
-            with mock.patch('sys.argv',
-                            ['copy_worker', 'copy', '/tmp/nonexistent']):
-                with self.assertRaises(SystemExit) as cm:
-                    cw.main()
+        with (
+            mock.patch.object(cw, 'do_copy',
+                              side_effect=RuntimeError('boom')),
+            mock.patch('sys.argv',
+                       ['copy_worker', 'copy', '/tmp/nonexistent']),
+            self.assertRaises(SystemExit) as cm,
+        ):
+            cw.main()
 
         self.assertEqual(cm.exception.code, 1)
 
@@ -618,21 +625,21 @@ class TestCopyWorkerExitOnFailure(TestCase):
         # interpreter's default behavior. If anyone wraps it later,
         # this test will fail and force the contract change to be
         # explicit.
-        import pfcon.copy_worker as cw
-
-        with mock.patch.object(cw, 'do_upload',
-                               side_effect=RuntimeError('boom')):
-            with mock.patch('sys.argv',
-                            ['copy_worker', 'upload', '/tmp/nonexistent']):
-                with self.assertRaises(RuntimeError):
-                    cw.main()
+        with (
+            mock.patch.object(cw, 'do_upload',
+                              side_effect=RuntimeError('boom')),
+            mock.patch('sys.argv',
+                       ['copy_worker', 'upload', '/tmp/nonexistent']),
+            self.assertRaises(RuntimeError),
+        ):
+            cw.main()
 
     def test_delete_subcommand_propagates_exception(self):
-        import pfcon.copy_worker as cw
-
-        with mock.patch.object(cw, 'do_delete',
-                               side_effect=RuntimeError('boom')):
-            with mock.patch('sys.argv',
-                            ['copy_worker', 'delete', '/tmp/nonexistent']):
-                with self.assertRaises(RuntimeError):
-                    cw.main()
+        with (
+            mock.patch.object(cw, 'do_delete',
+                              side_effect=RuntimeError('boom')),
+            mock.patch('sys.argv',
+                       ['copy_worker', 'delete', '/tmp/nonexistent']),
+            self.assertRaises(RuntimeError),
+        ):
+            cw.main()
