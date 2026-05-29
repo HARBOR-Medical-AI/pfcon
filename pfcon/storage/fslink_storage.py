@@ -81,8 +81,8 @@ class FSLinkStorage(BaseStorage):
         list of relative file paths.
 
         Any .chrislink files found in the outgoing directory are removed: ChRIS links
-        may only be authored by upstream CUBE, never by plugin output. In addition, any 
-        symlinks found in the outgoing directory are also removed.
+        may only be authored by upstream CUBE, never by plugin output. In addition, any
+        symlink found in the outgoing directory is also removed.
         """
         fs_rel_file_paths = []
         job_output_path = kwargs['job_output_path']
@@ -93,38 +93,34 @@ class FSLinkStorage(BaseStorage):
             if rel_path == '.':
                 rel_path = ''
 
+            # symlinks to directories land in `dirs` (os.walk classifies via
+            # is_dir which follows symlinks), so the files-pass alone misses
+            # them. Sanitize dirs first and mutate the list in place so
+            # os.walk does not descend into anything we removed.
+            kept_dirs = []
+            for dirname in dirs:
+                dir_path = os.path.join(root, dirname)
+                if os.path.islink(dir_path):
+                    self._unlink_or_fail(dir_path, job_id,
+                                         entity='symlink',
+                                         policy_plural='symlinks')
+                    continue
+                kept_dirs.append(dirname)
+            dirs[:] = kept_dirs
+
             for filename in files:
                 local_file_path = os.path.join(root, filename)
 
                 if filename.endswith('.chrislink'):
-                    # a non-deletable attacker-controlled link left in an output
-                    # dir is a security-relevant state: fail the job
-                    logger.warning(f'Removing unauthorized .chrislink file '
-                                   f'{local_file_path} from job {job_id} output; '
-                                   f'plugins are not allowed to create ChRIS links')
-                    try:
-                        os.remove(local_file_path)
-                    except OSError as e:
-                        logger.error(f'Failed to remove unauthorized .chrislink file '
-                                     f'{local_file_path} for job {job_id}, '
-                                     f'detail: {str(e)}')
-                        raise
+                    self._unlink_or_fail(local_file_path, job_id,
+                                         entity='.chrislink file',
+                                         policy_plural='ChRIS links')
                     continue
 
                 if os.path.islink(local_file_path):
-                    # symlinks can point anywhere on the mounted filesystem;
-                    # same blast radius as .chrislink, so treat as fatal on
-                    # removal failure
-                    logger.warning(f'Removing unauthorized symlink '
-                                   f'{local_file_path} from job {job_id} output; '
-                                   f'plugins are not allowed to create symlinks')
-                    try:
-                        os.remove(local_file_path)
-                    except OSError as e:
-                        logger.error(f'Failed to remove unauthorized symlink '
-                                     f'{local_file_path} for job {job_id}, '
-                                     f'detail: {str(e)}')
-                        raise
+                    self._unlink_or_fail(local_file_path, job_id,
+                                         entity='symlink',
+                                         policy_plural='symlinks')
                     continue
 
                 fs_rel_file_paths.append(os.path.join(rel_path, filename))
@@ -132,6 +128,30 @@ class FSLinkStorage(BaseStorage):
         data = {'job_output_path': job_output_path,
                 'rel_file_paths': fs_rel_file_paths}
         return io.BytesIO(json.dumps(data).encode())
+
+    @staticmethod
+    def _unlink_or_fail(path, job_id, *, entity, policy_plural):
+        """
+        Unlink an unauthorized filesystem entry produced by a plugin and
+        re-raise OSError on failure. A non-deletable attacker-controlled
+        entry left in an output dir is a security-relevant state, so this
+        helper treats removal failure as fatal — the caller must let the
+        exception propagate so the job fails rather than reporting success
+        with a tainted output dir.
+
+        `entity` is the singular noun used in the log messages (e.g.
+        '.chrislink file', 'symlink'); `policy_plural` is the noun used
+        in the policy statement (e.g. 'ChRIS links', 'symlinks').
+        """
+        logger.warning(f'Removing unauthorized {entity} {path} from job '
+                       f'{job_id} output; plugins are not allowed to '
+                       f'create {policy_plural}')
+        try:
+            os.remove(path)
+        except OSError:
+            logger.exception(f'Failed to remove unauthorized {entity} '
+                             f'{path} for job {job_id}')
+            raise
 
     def delete_data(self, job_dir):
         """

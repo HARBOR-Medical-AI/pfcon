@@ -9,6 +9,7 @@ from typing import List, Collection
 
 from flask import request, send_file, current_app as app
 from flask_restful import reqparse, abort, Resource
+from werkzeug.exceptions import HTTPException
 
 from .storage.zip_file_storage import ZipFileStorage
 from .storage.swift_storage import SwiftStorage
@@ -477,9 +478,10 @@ class PluginJobFile(Resource):
             try:
                 content = storage.get_data(job_id, outgoing_dir,
                                            job_output_path=job_output_path)
+            except HTTPException:
+                raise
             except Exception as e:
-                logger.error(f'Error fetching job {job_id} output data, '
-                             f'detail: {str(e)}')
+                logger.exception(f'Error fetching job {job_id} output data')
                 abort(500, message=str(e))
             download_name = f'{job_id}.json'
             mimetype = 'application/json'
@@ -503,9 +505,11 @@ class PluginJobFile(Resource):
                     content = storage.get_output_metadata(
                         job_id, outgoing_dir,
                         job_output_path=job_output_path)
+                except HTTPException:
+                    raise
                 except Exception as e:
-                    logger.error(f'Error fetching job {job_id} output '
-                                 f'metadata, detail: {str(e)}')
+                    logger.exception(f'Error fetching job {job_id} output '
+                                     f'metadata')
                     abort(500, message=str(e))
 
                 download_name = f'{job_id}.json'
@@ -522,9 +526,11 @@ class PluginJobFile(Resource):
                 storage = ZipFileStorage(app.config)
                 try:
                     content = storage.get_data(job_id, outgoing_dir)
+                except HTTPException:
+                    raise
                 except Exception as e:
-                    logger.error(f'Error fetching job {job_id} output data, '
-                                 f'detail: {str(e)}')
+                    logger.exception(f'Error fetching job {job_id} output '
+                                     f'data')
                     abort(500, message=str(e))
         else:
             job_dir = os.path.join(self.storebase_mount, 'key-' + job_id)
@@ -539,9 +545,11 @@ class PluginJobFile(Resource):
                 storage = ZipFileStorage(app.config)
                 try:
                     content = storage.get_data(job_id, outgoing_dir)
+                except HTTPException:
+                    raise
                 except Exception as e:
-                    logger.error(f'Error fetching job {job_id} output data, '
-                                 f'detail: {str(e)}')
+                    logger.exception(f'Error fetching job {job_id} output '
+                                     f'data')
                     abort(500, message=str(e))
 
         logger.info(f'Successfully retrieved job {job_id} output data')

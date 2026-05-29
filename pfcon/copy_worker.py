@@ -166,9 +166,8 @@ def main():
     if subcommand == 'copy':
         try:
             do_copy(key_dir)
-        except Exception as e:
-            logger.error(f'Copy worker failed for {key_dir}, '
-                         f'detail: {str(e)}')
+        except Exception:
+            logger.exception(f'Copy worker failed for {key_dir}')
             sys.exit(1)
     elif subcommand == 'upload':
         do_upload(key_dir)
