@@ -1958,3 +1958,97 @@ class TestConfigValidation(TestCase):
             'STOREBASE': self.tmpdir,
         })
         self.assertEqual(app.config['COMPUTE_VOLUME_TYPE'], 'host')
+
+
+# ---------------------------------------------------------------------------
+# PluginJobFile abort-500 wrappers for non-fslink storage backends.
+# The fslink wrapper is covered in tests/test_resources_fslink.py
+# (TestPluginJobFileFsLinkSanitizationFailure).
+# ---------------------------------------------------------------------------
+
+class TestPluginJobFileWrappersNonFslink(NewResourcesTestBase):
+    """
+    PluginJobFile.get() wraps its storage call in
+    try/except HTTPException: raise / except Exception -> abort(500) for
+    every storage backend. Verify the swift, s3, and zipfile
+    (out-of-network) wrappers fire by mocking the storage class to
+    raise a non-HTTP exception, and asserting the client sees 500.
+    """
+
+    def _set_config(self, **overrides):
+        saved = {k: self.app.config.get(k) for k in overrides}
+
+        def restore():
+            for k, v in saved.items():
+                self.app.config[k] = v
+
+        for k, v in overrides.items():
+            self.app.config[k] = v
+        return restore
+
+    def test_swift_get_output_metadata_failure_returns_500(self):
+        job_id = 'wrapper-swift-1'
+        os.makedirs(os.path.join(self.tmpdir, 'key-' + job_id, 'outgoing'))
+
+        restore = self._set_config(STORAGE_ENV='swift')
+        try:
+            with self.app.test_request_context():
+                url = url_for('api.pluginjobfile', job_id=job_id)
+
+            mock_storage = mock.MagicMock()
+            mock_storage.get_output_metadata.side_effect = OSError('boom')
+            with mock.patch('pfcon.resources.SwiftStorage',
+                            return_value=mock_storage):
+                response = self.client.get(
+                    url,
+                    query_string={'job_output_path': 'some/path'},
+                    headers=self.headers)
+
+            self.assertEqual(response.status_code, 500)
+        finally:
+            restore()
+
+    def test_s3_get_output_metadata_failure_returns_500(self):
+        job_id = 'wrapper-s3-1'
+        os.makedirs(os.path.join(self.tmpdir, 'key-' + job_id, 'outgoing'))
+
+        restore = self._set_config(STORAGE_ENV='s3')
+        try:
+            with self.app.test_request_context():
+                url = url_for('api.pluginjobfile', job_id=job_id)
+
+            mock_storage = mock.MagicMock()
+            mock_storage.get_output_metadata.side_effect = OSError('boom')
+            with mock.patch('pfcon.resources.S3Storage',
+                            return_value=mock_storage):
+                response = self.client.get(
+                    url,
+                    query_string={'job_output_path': 'some/path'},
+                    headers=self.headers)
+
+            self.assertEqual(response.status_code, 500)
+        finally:
+            restore()
+
+    def test_zipfile_get_data_failure_returns_500(self):
+        # Out-of-network zipfile path: PFCON_INNETWORK=False,
+        # STORAGE_ENV='zipfile'. The job key dir must exist or the
+        # handler short-circuits with 404 before reaching the wrapper.
+        job_id = 'wrapper-zipfile-1'
+        os.makedirs(os.path.join(self.tmpdir, 'key-' + job_id, 'outgoing'))
+
+        restore = self._set_config(PFCON_INNETWORK=False,
+                                   STORAGE_ENV='zipfile')
+        try:
+            with self.app.test_request_context():
+                url = url_for('api.pluginjobfile', job_id=job_id)
+
+            mock_storage = mock.MagicMock()
+            mock_storage.get_data.side_effect = OSError('boom')
+            with mock.patch('pfcon.resources.ZipFileStorage',
+                            return_value=mock_storage):
+                response = self.client.get(url, headers=self.headers)
+
+            self.assertEqual(response.status_code, 500)
+        finally:
+            restore()

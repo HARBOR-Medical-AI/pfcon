@@ -9,6 +9,7 @@ from typing import List, Collection
 
 from flask import request, send_file, current_app as app
 from flask_restful import reqparse, abort, Resource
+from werkzeug.exceptions import HTTPException
 
 from .storage.zip_file_storage import ZipFileStorage
 from .storage.swift_storage import SwiftStorage
@@ -474,8 +475,14 @@ class PluginJobFile(Resource):
             else:
                 storage = FSLinkStorage(app.config)
 
-            content = storage.get_data(job_id, outgoing_dir,
-                                       job_output_path=job_output_path)
+            try:
+                content = storage.get_data(job_id, outgoing_dir,
+                                           job_output_path=job_output_path)
+            except HTTPException:
+                raise
+            except Exception as e:
+                logger.exception(f'Error fetching job {job_id} output data')
+                abort(500, message=str(e))
             download_name = f'{job_id}.json'
             mimetype = 'application/json'
 
@@ -486,6 +493,7 @@ class PluginJobFile(Resource):
                 job_output_path = job_output_path.lstrip('/')
                 job_dir = os.path.join(self.storebase_mount, 'key-' + job_id)
                 outgoing_dir = os.path.join(job_dir, 'outgoing')
+
                 if not os.path.exists(outgoing_dir):
                     os.mkdir(outgoing_dir)
 
@@ -493,9 +501,16 @@ class PluginJobFile(Resource):
                     storage = SwiftStorage(app.config)
                 else:
                     storage = S3Storage(app.config)
-                content = storage.get_output_metadata(
-                    job_id, outgoing_dir,
-                    job_output_path=job_output_path)
+                try:
+                    content = storage.get_output_metadata(
+                        job_id, outgoing_dir,
+                        job_output_path=job_output_path)
+                except HTTPException:
+                    raise
+                except Exception as e:
+                    logger.exception(f'Error fetching job {job_id} output '
+                                     f'metadata')
+                    abort(500, message=str(e))
 
                 download_name = f'{job_id}.json'
                 mimetype = 'application/json'
@@ -509,7 +524,14 @@ class PluginJobFile(Resource):
                     os.mkdir(outgoing_dir)
 
                 storage = ZipFileStorage(app.config)
-                content = storage.get_data(job_id, outgoing_dir)
+                try:
+                    content = storage.get_data(job_id, outgoing_dir)
+                except HTTPException:
+                    raise
+                except Exception as e:
+                    logger.exception(f'Error fetching job {job_id} output '
+                                     f'data')
+                    abort(500, message=str(e))
         else:
             job_dir = os.path.join(self.storebase_mount, 'key-' + job_id)
             if not os.path.isdir(job_dir):
@@ -521,7 +543,14 @@ class PluginJobFile(Resource):
 
             if self.storage_env == 'zipfile':
                 storage = ZipFileStorage(app.config)
-                content = storage.get_data(job_id, outgoing_dir)
+                try:
+                    content = storage.get_data(job_id, outgoing_dir)
+                except HTTPException:
+                    raise
+                except Exception as e:
+                    logger.exception(f'Error fetching job {job_id} output '
+                                     f'data')
+                    abort(500, message=str(e))
 
         logger.info(f'Successfully retrieved job {job_id} output data')
 
