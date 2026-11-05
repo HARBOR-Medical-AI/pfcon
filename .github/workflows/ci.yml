@@ -95,6 +95,10 @@ jobs:
   build:
     needs: [test-pfcon, test-pfcon-k8s, test-cube]
     runs-on: ubuntu-24.04
+    # ghcr.io/fnndsc/pfcon* are FNNDSC's packages and this repository is HARBOR-Medical-AI's,
+    # so the push logs in with the FNNDSC account in GHCR_USERNAME and GHCR_TOKEN, not GITHUB_TOKEN.
+    permissions:
+      contents: read
     env:
       PIXI_COLOR: always
     steps:
@@ -199,8 +203,8 @@ jobs:
       uses: docker/login-action@v3
       with:
         registry: ghcr.io
-        username: ${{ github.repository_owner }}
-        password: ${{ secrets.GITHUB_TOKEN }}
+        username: ${{ secrets.GHCR_USERNAME }}
+        password: ${{ secrets.GHCR_TOKEN }}
     - name: Build and push
       uses: docker/build-push-action@v6
       with:
