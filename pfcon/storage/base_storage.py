@@ -90,7 +90,7 @@ class BaseStorage(abc.ABC):
 
             link_file_path = entry.path
 
-            if not any(link_file_path.startswith(p) for p in self._already_copied_src_set):  # only expand a link once
+            if not any(self.is_path_under(link_file_path, p) for p in self._already_copied_src_set):  # only expand a link once
                 with open(link_file_path, 'rb') as f:
                     rel_path = f.read().decode().strip()
                     abs_path = os.path.join(self.job_incoming_dir, rel_path)
@@ -117,6 +117,15 @@ class BaseStorage(abc.ABC):
 
         for subdir in subdirs:
             self._process_chrislink_files(subdir)
+
+    @staticmethod
+    def is_path_under(path, root):
+        """
+        Return True if path is root itself or lies inside the root folder. Paths
+        are compared as folders, not as strings: 'a/x2' is not under 'a/x'.
+        """
+        root = root.rstrip('/')
+        return path == root or path.startswith(root + '/')
 
     @staticmethod
     def _link_or_copy(src, dst):
