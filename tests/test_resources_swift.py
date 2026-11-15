@@ -19,6 +19,7 @@ import io
 import logging
 import os
 import shutil
+import tempfile
 import time
 import json
 from unittest import TestCase
@@ -30,6 +31,7 @@ from pfcon.compute.container_user import ContainerUser
 from pfcon.compute.abstractmgr import ManagerException
 from pfcon.base_resources import get_compute_mgr
 from pfcon.storage.swiftmanager import SwiftManager
+from pfcon.storage.swift_storage import SwiftStorage
 
 
 class NewResourcesSwiftTests(TestCase):
@@ -457,3 +459,122 @@ class TestDeleteJobNoDataSwift(NewResourcesSwiftTests):
                          'finishedSuccessfully')
         self.assertEqual(response.json['compute']['message'],
                          'deleteSkipped')
+
+
+class FakeSwiftManager:
+    """
+    In-memory stand-in for SwiftManager. ls() lists by name prefix, as
+    Swift's get_container(prefix=...) does, and records each prefix asked.
+    """
+
+    def __init__(self, objects):
+        self.objects = objects
+        self.ls_calls = []
+
+    def ls(self, path, **kwargs):
+        self.ls_calls.append(path)
+        return sorted(name for name in self.objects if name.startswith(path))
+
+    def download_obj(self, obj_path, **kwargs):
+        return self.objects[obj_path]
+
+
+class TestSwiftStorageStoreDataLinkedFolders(TestCase):
+    """
+    Unit tests for SwiftStorage.store_data() with an input prefix holding
+    .chrislink files, as written by pl-dircopy. A linked folder whose path
+    extends another linked folder's path as a string (x, x2) is a sibling,
+    not a descendant, and must be visited too.
+    """
+
+    def setUp(self):
+        logging.disable(logging.WARNING)
+        self.tmpdir = tempfile.mkdtemp()
+        self.uploads_rel = 'home/foo/uploads'
+        self.input_rel = 'home/foo/feeds/feed_1/pl-dircopy_1/data'
+        self.output_rel = ('home/foo/feeds/feed_1/pl-dircopy_1/'
+                           'pl-dsdircopy_2/data')
+        self.job_incoming_dir = os.path.join(self.tmpdir,
+                                             'key-chris-jid-1/incoming')
+        os.makedirs(self.job_incoming_dir)
+        self.objects = {}
+        self.storage = SwiftStorage({})
+        self.storage.swift_manager = FakeSwiftManager(self.objects)
+
+    def tearDown(self):
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+        logging.disable(logging.NOTSET)
+
+    def _put(self, obj_path, content):
+        self.objects[obj_path] = content.encode()
+
+    def _link(self, name, folder_rel):
+        self._put(f'{self.input_rel}/{name}.chrislink',
+                  f'{self.uploads_rel}/{folder_rel}')
+
+    def _store_data(self):
+        return self.storage.store_data('chris-jid-1', self.job_incoming_dir,
+                                       [self.input_rel],
+                                       job_output_path=self.output_rel)
+
+    def _staged(self, *parts):
+        return os.path.join(self.job_incoming_dir, *parts)
+
+    def _trace_dir(self, folder_rel):
+        return f'{self.uploads_rel}/{folder_rel}'.replace('/', '_')
+
+    def test_visits_folder_whose_path_extends_a_linked_folder(self):
+        self._put(f'{self.uploads_rel}/x/a.txt', 'a')
+        self._put(f'{self.uploads_rel}/x2/b.txt', 'b')
+        self._link('x', 'x')
+        self._link('x2', 'x2')
+
+        result = self._store_data()
+
+        self.assertIn(f'{self.uploads_rel}/x2',
+                      self.storage.swift_manager.ls_calls)
+        self.assertEqual(result['nfiles'], 2)
+        self.assertTrue(os.path.isfile(
+            self._staged(self._trace_dir('x'), 'a.txt')))
+        self.assertTrue(os.path.isfile(
+            self._staged(self._trace_dir('x2'), 'b.txt')))
+        self.assertEqual(sorted(os.listdir(self.job_incoming_dir)),
+                         sorted([self._trace_dir('x'),
+                                 self._trace_dir('x2')]))
+
+    def test_visits_folders_neither_a_prefix_of_the_other(self):
+        self._put(f'{self.uploads_rel}/x1/a.txt', 'a')
+        self._put(f'{self.uploads_rel}/x2/b.txt', 'b')
+        self._link('x1', 'x1')
+        self._link('x2', 'x2')
+
+        result = self._store_data()
+
+        self.assertEqual(self.storage.swift_manager.ls_calls,
+                         [self.input_rel, f'{self.uploads_rel}/x1',
+                          f'{self.uploads_rel}/x2'])
+        self.assertEqual(result['nfiles'], 2)
+        self.assertTrue(os.path.isfile(
+            self._staged(self._trace_dir('x1'), 'a.txt')))
+        self.assertTrue(os.path.isfile(
+            self._staged(self._trace_dir('x2'), 'b.txt')))
+
+    def test_skips_nested_linked_folder_already_listed(self):
+        self._put(f'{self.uploads_rel}/x/a.txt', 'a')
+        self._put(f'{self.uploads_rel}/x/sub/c.txt', 'c')
+        self._link('x', 'x')
+        self._link('x_sub', 'x/sub')
+
+        result = self._store_data()
+
+        # x.chrislink sorts before x_sub.chrislink, so x is listed first
+        # and its descendant x/sub is not listed again.
+        self.assertEqual(self.storage.swift_manager.ls_calls,
+                         [self.input_rel, f'{self.uploads_rel}/x'])
+        self.assertEqual(result['nfiles'], 2)
+        self.assertTrue(os.path.isfile(
+            self._staged(self._trace_dir('x'), 'a.txt')))
+        self.assertTrue(os.path.isfile(
+            self._staged(self._trace_dir('x'), 'sub', 'c.txt')))
+        self.assertTrue(os.path.isfile(
+            self._staged(self._trace_dir('x/sub'), 'c.txt')))
