@@ -165,7 +165,7 @@ class FSLinkStorage(BaseStorage):
         recursively following ChRIS links. The resulting set of file paths is given
         by the file_paths set argument.
         """
-        if not any(storage_path.startswith(p) for p in visited_paths):  # avoid infinite loops
+        if not any(self.is_path_under(storage_path, p) for p in visited_paths):  # avoid infinite loops
             visited_paths.add(storage_path)
             job_id = self.job_id
             job_output_path = self.job_output_path

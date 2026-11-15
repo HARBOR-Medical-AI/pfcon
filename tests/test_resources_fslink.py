@@ -532,6 +532,130 @@ class TestFSLinkStorageGetDataSanitization(TestCase):
         self.assertNotIn('broken', data['rel_file_paths'])
 
 
+class TestFSLinkStorageStoreDataLinkedFolders(TestCase):
+    """
+    Unit tests for FSLinkStorage.store_data() with an input dir holding
+    .chrislink files, as written by pl-dircopy. A linked folder whose path
+    extends another linked folder's path as a string (x, x2) is a sibling,
+    not a descendant, and must be staged too.
+    """
+
+    def setUp(self):
+        logging.disable(logging.WARNING)
+        self.tmpdir = tempfile.mkdtemp()
+        self.storebase = os.path.join(self.tmpdir, 'storeBase')
+        self.uploads_rel = 'home/foo/uploads'
+        self.input_rel = 'home/foo/feeds/feed_1/pl-dircopy_1/data'
+        self.output_rel = ('home/foo/feeds/feed_1/pl-dircopy_1/'
+                           'pl-dsdircopy_2/data')
+        self.job_incoming_dir = os.path.join(self.tmpdir,
+                                             'key-chris-jid-1/incoming')
+        os.makedirs(os.path.join(self.storebase, self.input_rel))
+        os.makedirs(self.job_incoming_dir)
+        self.storage = FSLinkStorage({'STOREBASE_MOUNT': self.storebase})
+
+    def tearDown(self):
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+        logging.disable(logging.NOTSET)
+
+    def _write(self, rel_path, content):
+        path = os.path.join(self.storebase, rel_path)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, 'w') as f:
+            f.write(content)
+
+    def _link(self, name, folder_rel):
+        self._write(f'{self.input_rel}/{name}.chrislink',
+                    f'{self.uploads_rel}/{folder_rel}')
+
+    def _store_data(self):
+        # os.walk lists files in directory order, which depends on the
+        # filesystem. Sort it so x.chrislink is always followed before
+        # x2.chrislink, the order that exposes a string-prefix comparison.
+        real_walk = os.walk
+
+        def sorted_walk(*args, **kwargs):
+            for root, dirs, files in real_walk(*args, **kwargs):
+                dirs.sort()
+                yield root, dirs, sorted(files)
+
+        with mock.patch('pfcon.storage.fslink_storage.os.walk',
+                        side_effect=sorted_walk):
+            return self.storage.store_data('chris-jid-1',
+                                           self.job_incoming_dir,
+                                           [self.input_rel],
+                                           job_output_path=self.output_rel)
+
+    def _staged(self, *parts):
+        return os.path.join(self.job_incoming_dir, *parts)
+
+    def _trace_dir(self, folder_rel):
+        return f'{self.uploads_rel}/{folder_rel}'.replace('/', '_')
+
+    def test_stages_folder_whose_path_extends_a_linked_folder(self):
+        self._write(f'{self.uploads_rel}/x/a.txt', 'a')
+        self._write(f'{self.uploads_rel}/x2/b.txt', 'b')
+        self._link('x', 'x')
+        self._link('x2', 'x2')
+
+        result = self._store_data()
+
+        self.assertEqual(result['nfiles'], 2)
+        self.assertTrue(os.path.isfile(
+            self._staged(self._trace_dir('x'), 'a.txt')))
+        self.assertTrue(os.path.isfile(
+            self._staged(self._trace_dir('x2'), 'b.txt')))
+        self.assertEqual(sorted(os.listdir(self.job_incoming_dir)),
+                         sorted([self._trace_dir('x'),
+                                 self._trace_dir('x2')]))
+
+    def test_stages_folders_neither_a_prefix_of_the_other(self):
+        self._write(f'{self.uploads_rel}/x1/a.txt', 'a')
+        self._write(f'{self.uploads_rel}/x2/b.txt', 'b')
+        self._link('x1', 'x1')
+        self._link('x2', 'x2')
+
+        result = self._store_data()
+
+        self.assertEqual(result['nfiles'], 2)
+        self.assertTrue(os.path.isfile(
+            self._staged(self._trace_dir('x1'), 'a.txt')))
+        self.assertTrue(os.path.isfile(
+            self._staged(self._trace_dir('x2'), 'b.txt')))
+        self.assertEqual(sorted(os.listdir(self.job_incoming_dir)),
+                         sorted([self._trace_dir('x1'),
+                                 self._trace_dir('x2')]))
+
+    def test_stages_nested_linked_folder_once_per_link(self):
+        self._write(f'{self.uploads_rel}/x/a.txt', 'a')
+        self._write(f'{self.uploads_rel}/x/sub/c.txt', 'c')
+        self._link('x', 'x')
+        self._link('sub', 'x/sub')
+
+        result = self._store_data()
+
+        self.assertEqual(result['nfiles'], 2)
+        self.assertTrue(os.path.isfile(
+            self._staged(self._trace_dir('x'), 'a.txt')))
+        self.assertTrue(os.path.isfile(
+            self._staged(self._trace_dir('x'), 'sub', 'c.txt')))
+        self.assertTrue(os.path.isfile(
+            self._staged(self._trace_dir('x/sub'), 'c.txt')))
+        self.assertEqual(sorted(os.listdir(self.job_incoming_dir)),
+                         sorted([self._trace_dir('x'),
+                                 self._trace_dir('x/sub')]))
+
+    def test_is_path_under_compares_folders(self):
+        is_under = FSLinkStorage.is_path_under
+        self.assertTrue(is_under('a/x', 'a/x'))
+        self.assertTrue(is_under('a/x', 'a/x/'))
+        self.assertTrue(is_under('a/x/sub', 'a/x'))
+        self.assertTrue(is_under('a/x/sub/f.chrislink', 'a/x/'))
+        self.assertFalse(is_under('a/x2', 'a/x'))
+        self.assertFalse(is_under('a/x2/f.chrislink', 'a/x'))
+        self.assertFalse(is_under('a', 'a/x'))
+
+
 class TestPluginJobFileFsLinkSanitizationFailure(NewResourcesFsLinkTests):
     """
     Lock in the resources.py outer wrapper: when FSLinkStorage.get_data
